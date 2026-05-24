@@ -7,8 +7,7 @@ import threading
 import time
 
 app = Flask(__name__)
-CORS(app)  # Permite o frontend acessar o backend
-
+CORS(app, origins=["https://baixaclip.online", "https://www.baixaclip.online"])
 DOWNLOAD_DIR = "/tmp/snapload"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
