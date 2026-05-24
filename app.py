@@ -96,6 +96,54 @@ def abacate_headers():
         "Content-Type": "application/json"
     }
 
+UTMIFY_API_KEY = "V3FUbpTG6gaf57ubRL2UKJ0lKNnzqtNuFKgp"
+
+def notify_utmify(checkout):
+    """Envia a venda confirmada para o UTMify"""
+    try:
+        plan_prices = {"daily": 5.90, "weekly": 14.90, "monthly": 19.90}
+        payload = {
+            "orderId":        checkout["id"],
+            "platform":       "other",
+            "paymentMethod":  "pix",
+            "status":         "paid",
+            "createdAt":      time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "approvedDate":   time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "refundedAt":     None,
+            "customer": {
+                "name":     checkout["nick"],
+                "email":    f"{checkout['nick']}@baixaclip.online",
+                "phone":    None,
+                "document": None,
+            },
+            "products": [{
+                "id":       checkout["plan"],
+                "name":     PLAN_NAMES[checkout["plan"]],
+                "planId":   None,
+                "planName": None,
+                "quantity": 1,
+                "priceInCents": PLAN_AMOUNTS[checkout["plan"]],
+            }],
+            "commission": {
+                "totalPriceInCents": PLAN_AMOUNTS[checkout["plan"]],
+                "gatewayFeeInCents": 0,
+                "userCommissionInCents": PLAN_AMOUNTS[checkout["plan"]],
+            },
+            "isTest": False,
+        }
+        resp = requests.post(
+            "https://api.utmify.com.br/api-credentials/orders",
+            json=payload,
+            headers={
+                "x-api-token": UTMIFY_API_KEY,
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        print("UTMIFY RESPONSE:", resp.status_code, resp.text)
+    except Exception as e:
+        print("UTMIFY ERROR:", str(e))
+
 # ── CLEANUP ───────────────────────────────────────────────
 def cleanup_old_files():
     while True:
@@ -367,6 +415,7 @@ def check_payment():
             )
             conn.commit()
             conn.close()
+            notify_utmify(dict(checkout) | {"id": checkout_id})
             return jsonify({"paid": True, "code": code})
 
     except Exception:
@@ -405,6 +454,7 @@ def webhook():
                 "UPDATE checkouts SET status = 'paid' WHERE id = ?", (external_id,)
             )
             conn.commit()
+            notify_utmify(dict(checkout))
         conn.close()
 
     return jsonify({"ok": True})
