@@ -228,14 +228,18 @@ def download():
         return jsonify({"error": str(e)}), 400
 
 # ── CREATE CHECKOUT ───────────────────────────────────────
+PLAN_AMOUNTS = {"daily": 590, "weekly": 1490, "monthly": 1990}
+
 @app.route("/api/create-checkout", methods=["POST"])
 def create_checkout():
     data = request.get_json()
+    print("CREATE CHECKOUT REQUEST:", data)
+
     plan = data.get("plan")
     nick = data.get("nick", "").strip().lower()
     pwd  = data.get("pass", "")
 
-    if plan not in PRODUCT_IDS:
+    if plan not in PLAN_AMOUNTS:
         return jsonify({"error": "Plano inválido"}), 400
     if not nick or len(nick) < 3:
         return jsonify({"error": "Nick inválido"}), 400
@@ -249,54 +253,88 @@ def create_checkout():
     if user:
         if user["pass_hash"] != hash_pass(pwd):
             conn.close()
-            return jsonify({"error": "Nick já existe com outra senha"}), 400
+            return jsonify({"error": "Nick já existe com outra senha. Tente outro nick."}), 400
     else:
         conn.execute("INSERT INTO users (nick, pass_hash) VALUES (?, ?)", (nick, hash_pass(pwd)))
         conn.commit()
 
-    # Cria checkout na AbacatePay
+    # Cria cobrança Pix na AbacatePay
     checkout_id = str(uuid.uuid4())
     payload = {
-        "items": [{"id": PRODUCT_IDS[plan], "quantity": 1}],
-        "methods": ["PIX"],
+        "amount": PLAN_AMOUNTS[plan],
         "externalId": checkout_id,
-        "metadata": {"nick": nick, "plan": plan}
+        "description": f"BaixaClip - {PLAN_NAMES[plan]} - @{nick}",
+        "customer": {
+            "name": nick,
+            "email": f"{nick}@baixaclip.online"
+        }
     }
+
+    print("ABACATE PAYLOAD:", payload)
 
     try:
         resp = requests.post(
-            f"{ABACATE_BASE}/checkouts/create",
+            f"{ABACATE_BASE}/pixQrCode/create",
             json=payload,
             headers=abacate_headers(),
             timeout=15
         )
+        print("ABACATE STATUS:", resp.status_code)
         resp_data = resp.json()
+        print("ABACATE RESPONSE:", resp_data)
+
+        if not resp_data.get("success"):
+            # Fallback: tenta billing
+            resp2 = requests.post(
+                f"{ABACATE_BASE}/billing/create",
+                json={
+                    "frequency": "ONE_TIME",
+                    "methods": ["PIX"],
+                    "products": [{"externalId": plan, "name": PLAN_NAMES[plan], "quantity": 1, "price": PLAN_AMOUNTS[plan]}],
+                    "externalId": checkout_id,
+                    "customer": {"name": nick, "email": f"{nick}@baixaclip.online", "cellphone": "11999999999", "taxId": {"type": "CPF", "number": "00000000000"}}
+                },
+                headers=abacate_headers(),
+                timeout=15
+            )
+            print("BILLING STATUS:", resp2.status_code)
+            resp_data = resp2.json()
+            print("BILLING RESPONSE:", resp_data)
 
         if not resp_data.get("success"):
             conn.close()
             return jsonify({"error": resp_data.get("error", "Erro na AbacatePay")}), 400
 
-        checkout_data = resp_data["data"]
-        abacate_id  = checkout_data.get("id")
-        abacate_url = checkout_data.get("url")
-        pix_code    = checkout_data.get("pixCode") or checkout_data.get("pix_code") or ""
-        qr_url      = checkout_data.get("qrCodeUrl") or checkout_data.get("qr_code_url") or ""
+        d = resp_data["data"]
+
+        # Tenta extrair pix_code e qr_code_url de vários campos possíveis
+        pix_code  = (d.get("pixCode") or d.get("pix_code") or d.get("emv") or
+                     d.get("brCode") or d.get("code") or "")
+        qr_url    = (d.get("qrCodeUrl") or d.get("qr_code_url") or d.get("qrCode") or
+                     d.get("qrcode") or d.get("qr_image") or "")
+        abacate_id = d.get("id") or checkout_id
+        pay_url    = d.get("url") or d.get("checkoutUrl") or ""
+
+        # Gera QR via API pública se não tiver
+        if pix_code and not qr_url:
+            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={requests.utils.quote(pix_code)}"
 
         conn.execute("""
             INSERT INTO checkouts (id, nick, plan, abacate_id, abacate_url, pix_code, qr_code_url)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (checkout_id, nick, plan, abacate_id, abacate_url, pix_code, qr_url))
+        """, (checkout_id, nick, plan, abacate_id, pay_url, pix_code, qr_url))
         conn.commit()
         conn.close()
 
         return jsonify({
             "checkout_id": checkout_id,
-            "payment_url": abacate_url,
+            "payment_url": pay_url,
             "pix_code":    pix_code,
             "qr_code_url": qr_url,
         })
 
     except Exception as e:
+        print("EXCEPTION:", str(e))
         conn.close()
         return jsonify({"error": str(e)}), 500
 
