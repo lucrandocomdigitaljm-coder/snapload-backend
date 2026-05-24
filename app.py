@@ -258,15 +258,16 @@ def create_checkout():
         conn.execute("INSERT INTO users (nick, pass_hash) VALUES (?, ?)", (nick, hash_pass(pwd)))
         conn.commit()
 
-    # Cria cobrança Pix na AbacatePay
+    # Cria cobrança transparente Pix na AbacatePay
     checkout_id = str(uuid.uuid4())
     payload = {
-        "amount": PLAN_AMOUNTS[plan],
-        "externalId": checkout_id,
-        "description": f"BaixaClip - {PLAN_NAMES[plan]} - @{nick}",
-        "customer": {
-            "name": nick,
-            "email": f"{nick}@baixaclip.online"
+        "method": "PIX",
+        "data": {
+            "amount": PLAN_AMOUNTS[plan],
+            "description": f"BaixaClip - {PLAN_NAMES[plan]} - @{nick}",
+            "externalId": checkout_id,
+            "expiresIn": 3600,
+            "metadata": {"nick": nick, "plan": plan}
         }
     }
 
@@ -274,7 +275,7 @@ def create_checkout():
 
     try:
         resp = requests.post(
-            f"{ABACATE_BASE}/pixQrCode/create",
+            f"{ABACATE_BASE}/transparents/create",
             json=payload,
             headers=abacate_headers(),
             timeout=15
@@ -284,53 +285,26 @@ def create_checkout():
         print("ABACATE RESPONSE:", resp_data)
 
         if not resp_data.get("success"):
-            # Fallback: tenta billing
-            resp2 = requests.post(
-                f"{ABACATE_BASE}/billing/create",
-                json={
-                    "frequency": "ONE_TIME",
-                    "methods": ["PIX"],
-                    "products": [{"externalId": plan, "name": PLAN_NAMES[plan], "quantity": 1, "price": PLAN_AMOUNTS[plan]}],
-                    "externalId": checkout_id,
-                    "customer": {"name": nick, "email": f"{nick}@baixaclip.online", "cellphone": "11999999999", "taxId": {"type": "CPF", "number": "00000000000"}}
-                },
-                headers=abacate_headers(),
-                timeout=15
-            )
-            print("BILLING STATUS:", resp2.status_code)
-            resp_data = resp2.json()
-            print("BILLING RESPONSE:", resp_data)
-
-        if not resp_data.get("success"):
             conn.close()
             return jsonify({"error": resp_data.get("error", "Erro na AbacatePay")}), 400
 
         d = resp_data["data"]
 
-        # Tenta extrair pix_code e qr_code_url de vários campos possíveis
-        pix_code  = (d.get("pixCode") or d.get("pix_code") or d.get("emv") or
-                     d.get("brCode") or d.get("code") or "")
-        qr_url    = (d.get("qrCodeUrl") or d.get("qr_code_url") or d.get("qrCode") or
-                     d.get("qrcode") or d.get("qr_image") or "")
         abacate_id = d.get("id") or checkout_id
-        pay_url    = d.get("url") or d.get("checkoutUrl") or ""
-
-        # Gera QR via API pública se não tiver
-        if pix_code and not qr_url:
-            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={requests.utils.quote(pix_code)}"
+        pix_code   = d.get("brCode") or ""
+        qr_base64  = d.get("brCodeBase64") or ""
 
         conn.execute("""
             INSERT INTO checkouts (id, nick, plan, abacate_id, abacate_url, pix_code, qr_code_url)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (checkout_id, nick, plan, abacate_id, pay_url, pix_code, qr_url))
+        """, (checkout_id, nick, plan, abacate_id, "", pix_code, qr_base64))
         conn.commit()
         conn.close()
 
         return jsonify({
             "checkout_id": checkout_id,
-            "payment_url": pay_url,
             "pix_code":    pix_code,
-            "qr_code_url": qr_url,
+            "qr_code_url": qr_base64,
         })
 
     except Exception as e:
@@ -366,14 +340,15 @@ def check_payment():
         conn.close()
         return jsonify({"paid": True, "code": code_row["code"] if code_row else None})
 
-    # Consulta status na AbacatePay
+    # Consulta status na AbacatePay (transparents)
     try:
         resp = requests.get(
-            f"{ABACATE_BASE}/checkouts/{checkout['abacate_id']}",
+            f"{ABACATE_BASE}/transparents/{checkout['abacate_id']}",
             headers=abacate_headers(),
             timeout=10
         )
         resp_data = resp.json()
+        print("CHECK PAYMENT RESPONSE:", resp_data)
         status = resp_data.get("data", {}).get("status", "")
 
         if status == "PAID":
